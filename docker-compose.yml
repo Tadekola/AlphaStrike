@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  alphastrike:
+    build: .
+    image: alphastrike:latest
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    environment:
+      - TRADIER_TOKEN=${TRADIER_TOKEN}
+    volumes:
+      - .:/app
+    # Enable this for development (auto-reload)
+    # command: streamlit run app_streamlit.py --server.runOnSave true
