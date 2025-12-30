@@ -5,8 +5,9 @@ import datetime as dt
 import math
 from ..data_providers.base import DataProvider, Bar
 
-# IV Rank label for transparency
+# IV Rank labels for transparency
 IV_RANK_NOT_IMPLEMENTED = "NOT IMPLEMENTED (FREE DATA LIMITATION)"
+IV_RANK_HV_PROXY = "HV PROXY (estimate only - not true IV rank)"
 
 # Indicator methodology labels
 ADX_METHOD = "Wilder-smoothed (14-period)"
@@ -41,9 +42,10 @@ class MarketState:
     gex_method: str = GEX_METHOD
     bollinger_width: float = 0.0
     
-    # Not implemented
-    iv_rank: Optional[float] = None  # NOT IMPLEMENTED - requires 52-week IV history
+    # IV Rank proxy using historical volatility
+    iv_rank: Optional[float] = None  # HV-based proxy when available
     iv_rank_label: str = IV_RANK_NOT_IMPLEMENTED
+    hv_ratio: Optional[float] = None  # HV5/HV20 ratio for vol regime
     
     # Classification
     regime: str = "Neutral"
@@ -112,6 +114,11 @@ class MarketState:
         elif gex > 1_000_000:
             regime_parts.append("Pos Gamma")
             
+        # Calculate IV Rank proxy using HV percentile
+        # This uses HV20 compared to a longer lookback as a proxy
+        iv_rank_proxy, iv_rank_label = cls._iv_rank_proxy(closes)
+        hv_ratio = hv5 / hv20 if hv20 > 0 else 1.0
+        
         return cls(
             ticker=ticker,
             spot=spot,
@@ -125,7 +132,10 @@ class MarketState:
             minus_di14=minus_di,
             gex=gex,
             bollinger_width=cls._bollinger_width(closes, 20),
-            regime=" / ".join(regime_parts)
+            regime=" / ".join(regime_parts),
+            iv_rank=iv_rank_proxy,
+            iv_rank_label=iv_rank_label,
+            hv_ratio=hv_ratio
         )
 
     @staticmethod
@@ -210,16 +220,23 @@ class MarketState:
         
         # Step 4: Wilder smoothing function
         def wilder_smooth(data: List[float], period: int) -> List[float]:
-            """Wilder's smoothing: smoothed(t) = smoothed(t-1) × (n-1)/n + value(t)"""
+            """Wilder's smoothing: smoothed(t) = smoothed(t-1) × (n-1)/n + value(t)/n
+            
+            Standard Wilder EMA formula used in ADX, ATR calculations.
+            First value is SMA of first n periods, then Wilder smoothing applied.
+            """
             if len(data) < period:
                 return []
             
-            # First smoothed value is simple sum of first n values
-            smoothed = [sum(data[:period])]
+            # First smoothed value is simple AVERAGE (SMA) of first n values
+            first_avg = sum(data[:period]) / period
+            smoothed = [first_avg]
             
-            # Subsequent values use Wilder smoothing
+            # Subsequent values use Wilder smoothing: 
+            # smoothed(t) = smoothed(t-1) * (n-1)/n + value(t)/n
+            # This is equivalent to: smoothed(t) = smoothed(t-1) + (value(t) - smoothed(t-1))/n
             for i in range(period, len(data)):
-                new_val = smoothed[-1] - (smoothed[-1] / period) + data[i]
+                new_val = smoothed[-1] + (data[i] - smoothed[-1]) / period
                 smoothed.append(new_val)
             
             return smoothed
@@ -257,8 +274,9 @@ class MarketState:
         if not smoothed_dx:
             return (0.0, plus_di, minus_di)
         
-        # Final ADX is the last smoothed DX value divided by n (since Wilder sum)
-        adx = smoothed_dx[-1] / n
+        # Final ADX: wilder_smooth now properly returns averages (not sums)
+        # so no additional division is needed.
+        adx = smoothed_dx[-1]
         
         return (adx, plus_di, minus_di)
 
@@ -359,3 +377,48 @@ class MarketState:
         
         # Population standard deviation of log returns, annualized
         return stats.pstdev(log_returns[-n_real:]) * math.sqrt(252)
+    
+    @staticmethod
+    def _iv_rank_proxy(closes: List[float], lookback: int = 60) -> tuple:
+        """Calculate IV Rank proxy using historical volatility percentile.
+        
+        Since we don't have 52-week IV history from free data sources,
+        we use HV20 percentile over the available lookback as a proxy.
+        
+        This is NOT true IV Rank, but provides a rough estimate of whether
+        current volatility is high or low relative to recent history.
+        
+        Args:
+            closes: List of closing prices (most recent last)
+            lookback: Number of periods for percentile calculation
+            
+        Returns:
+            Tuple of (iv_rank_proxy, label)
+        """
+        if len(closes) < 25:  # Need at least 25 days for meaningful HV20 history
+            return (None, IV_RANK_NOT_IMPLEMENTED)
+        
+        # Calculate rolling HV20 values
+        hv_values = []
+        for i in range(20, min(len(closes), lookback)):
+            window = closes[i-20:i]
+            if len(window) >= 2:
+                log_returns = []
+                for j in range(1, len(window)):
+                    if window[j-1] > 0 and window[j] > 0:
+                        log_returns.append(math.log(window[j] / window[j-1]))
+                if len(log_returns) >= 2:
+                    hv = stats.pstdev(log_returns) * math.sqrt(252)
+                    hv_values.append(hv)
+        
+        if len(hv_values) < 5:
+            return (None, IV_RANK_NOT_IMPLEMENTED)
+        
+        # Current HV20 is last value
+        current_hv = hv_values[-1]
+        
+        # Calculate percentile rank
+        below_count = sum(1 for hv in hv_values[:-1] if hv < current_hv)
+        percentile = below_count / (len(hv_values) - 1)
+        
+        return (round(percentile, 2), IV_RANK_HV_PROXY)

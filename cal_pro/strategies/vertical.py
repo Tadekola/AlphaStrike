@@ -1,7 +1,9 @@
 import datetime as dt
-from typing import List, Dict, Any
-from ..engine.base_strategy import Strategy, CandidateTrade, Leg, MarketState, POP_LABEL_UNVERIFIED
-from ..engine.utils import mid_iv, round_strike
+from typing import List, Dict, Any, Optional
+from ..engine.base_strategy import CandidateTrade, Leg, MarketState, POP_LABEL_UNVERIFIED
+from ..engine.utils import mid_iv
+
+POP_LABEL_DELTA_PROXY = "DELTA_PROXY (estimate only)"
 
 class VerticalStrategy:
     def __init__(self, 
@@ -64,6 +66,9 @@ class VerticalStrategy:
                             Leg(market.ticker, short_k, expiry, "put", "sell"),
                             Leg(market.ticker, long_k, expiry, "put", "buy")
                         ]
+                        # Estimate POP using delta proxy
+                        pop_estimate = self._estimate_pop_delta_proxy(chain, short_k, "put")
+                        
                         candidates.append(CandidateTrade(
                             strategy_name="Bull Put Vertical",
                             ticker=market.ticker,
@@ -72,8 +77,8 @@ class VerticalStrategy:
                             max_loss=round(max_loss * 100, 2),
                             max_profit=round(credit * 100, 2),
                             breakevens=[short_k - credit],
-                            pop=None,  # POP not computed
-                            pop_label=POP_LABEL_UNVERIFIED,
+                            pop=pop_estimate,
+                            pop_label=POP_LABEL_DELTA_PROXY if pop_estimate else POP_LABEL_UNVERIFIED,
                             description=f"Bull Put {short_k}/{long_k}"
                         ))
         else:
@@ -98,6 +103,9 @@ class VerticalStrategy:
                             Leg(market.ticker, short_k, expiry, "call", "sell"),
                             Leg(market.ticker, long_k, expiry, "call", "buy")
                         ]
+                        # Estimate POP using delta proxy
+                        pop_estimate = self._estimate_pop_delta_proxy(chain, short_k, "call")
+                        
                         candidates.append(CandidateTrade(
                             strategy_name="Bear Call Vertical",
                             ticker=market.ticker,
@@ -106,9 +114,31 @@ class VerticalStrategy:
                             max_loss=round(max_loss * 100, 2),
                             max_profit=round(credit * 100, 2),
                             breakevens=[short_k + credit],
-                            pop=None,  # POP not computed
-                            pop_label=POP_LABEL_UNVERIFIED,
+                            pop=pop_estimate,
+                            pop_label=POP_LABEL_DELTA_PROXY if pop_estimate else POP_LABEL_UNVERIFIED,
                             description=f"Bear Call {short_k}/{long_k}"
                         ))
 
         return candidates
+    
+    def _estimate_pop_delta_proxy(self, chain, short_strike: float, right: str) -> Optional[float]:
+        """Estimate POP using delta as probability proxy.
+        
+        For credit spreads:
+        - Bull Put: POP ≈ 1 - |short put delta| (probability put expires OTM)
+        - Bear Call: POP ≈ 1 - |short call delta| (probability call expires OTM)
+        
+        This is an APPROXIMATION. Deltas are not exact probabilities.
+        """
+        short_opt = next((o for o in chain.options if o.right == right and o.strike == short_strike), None)
+        
+        if not short_opt or short_opt.delta is None:
+            return None
+        
+        # For credit spreads, POP = probability short strike expires OTM
+        # Put delta is negative, call delta is positive
+        # P(OTM) ≈ 1 - |delta|
+        itm_prob = abs(short_opt.delta)
+        pop = 1.0 - itm_prob
+        
+        return max(0.0, min(1.0, round(pop, 2)))

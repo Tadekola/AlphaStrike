@@ -1,4 +1,5 @@
 from pathlib import Path
+from datetime import datetime
 import streamlit as st
 import pandas as pd
 from dotenv import load_dotenv
@@ -6,6 +7,8 @@ from dotenv import load_dotenv
 # Engine Imports
 from cal_pro.data_providers.tradier import TradierProvider
 from cal_pro.data_providers.mock import MockProvider, is_mock_allowed
+from cal_pro.data_providers.public_provider import PublicProvider, is_public_configured
+from cal_pro.data_providers.hybrid_provider import HybridProvider, is_hybrid_available, get_hybrid_status
 from cal_pro.engine.pipeline import Pipeline, REGIME_REJECTED
 from cal_pro.engine.universes import get_universe, UNIVERSES
 from cal_pro.engine.tradability import TradabilityConfig
@@ -65,8 +68,15 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("AlphaStrike ⚡")
-st.markdown("### Institutional Options Intelligence")
+st.title("AlphaStrike")
+st.markdown("### Options Analysis & Paper Trading Toolkit")
+
+# Persistent disclaimer banner
+st.warning(
+    "**RESEARCH TOOL ONLY** - This is not financial advice. All outputs are for educational purposes "
+    "and require independent verification before any trading decisions. Past patterns do not predict future results. "
+    "See README for full limitations."
+)
 
 # Track if mock mode is active for banner display
 _mock_mode_active = False
@@ -75,11 +85,19 @@ _mock_mode_active = False
 with st.sidebar:
     st.header("⚙️ Settings")
     
-    # Provider Selection with Mock Safety Gate
-    provider_options = ["Tradier"]
+    # Provider Selection with Safety Gates
+    provider_options = []
+    if is_hybrid_available():
+        provider_options.append("Hybrid (Recommended)")
+    if is_public_configured():
+        provider_options.append("Public.com Only")
+    provider_options.append("Tradier Only")
     if is_mock_allowed():
         provider_options.append("Mock")
     provider_name = st.selectbox("Data Provider", provider_options)
+    
+    # Show hybrid status
+    st.caption(get_hybrid_status())
     
     if not is_mock_allowed():
         st.caption("ℹ️ Mock data disabled. Set ALLOW_MOCK_DATA=true to enable.")
@@ -169,7 +187,11 @@ if st.button("🚀 Run Analysis", use_container_width=True):
         
         # 1. Provider Setup
         try:
-            if provider_name == "Tradier":
+            if provider_name == "Hybrid (Recommended)":
+                provider = HybridProvider(ticker)
+            elif provider_name == "Public.com Only":
+                provider = PublicProvider(ticker)
+            elif provider_name == "Tradier Only":
                 provider = TradierProvider(ticker)
             else:
                 provider = MockProvider(ticker)
@@ -205,6 +227,14 @@ if st.button("🚀 Run Analysis", use_container_width=True):
 
     progress_bar.empty()
     status_text.empty()
+    
+    # Data freshness indicator with cache warning
+    analysis_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    st.warning(
+        f"**Data Freshness**: Analysis at {analysis_time}. "
+        f"Option quotes may be **5-15 minutes delayed** due to provider caching. "
+        f"Greeks and prices can change rapidly. Always verify current quotes before trading."
+    )
 
     # --- Display Results ---
     if not results_cache:
@@ -275,6 +305,12 @@ if st.button("🚀 Run Analysis", use_container_width=True):
                 
                 with st.expander(title, expanded=(i==0)):
                     
+                    # Trade-level disclaimer
+                    st.caption(
+                        "This analysis is for educational purposes only. Verify all data independently. "
+                        "Options involve risk of loss. Past performance does not predict future results."
+                    )
+                    
                     # Tradability banner
                     if trade.is_tradable:
                         st.success(f"**{trade.tradability_status}** — Estimated slippage: ${trade.slippage_cost:.2f}")
@@ -291,10 +327,30 @@ if st.button("🚀 Run Analysis", use_container_width=True):
                     # Layout: Metrics
                     c1, c2, c3, c4 = st.columns(4)
                     c1.metric("Confidence", f"{trade.confidence_score}/100", delta=trade.confidence_label)
-                    c2.metric("Max Profit", f"${trade.max_profit:.2f}")
-                    c3.metric("Max Loss", str(trade.max_loss) if trade.max_loss != float('inf') else "∞")
+                    c2.metric("Max Profit", f"${trade.max_profit:.2f}*")
+                    max_loss_display = str(trade.max_loss) if trade.max_loss != float('inf') else "UNLIMITED"
+                    c3.metric("Max Loss", max_loss_display)
                     pop_display = f"{trade.pop:.0%}" if trade.pop is not None else "N/A"
                     c4.metric("POP", pop_display, delta=trade.pop_label if trade.pop is None else None)
+                    
+                    # Position sizing warning
+                    if trade.max_loss == float('inf'):
+                        st.error(
+                            "**UNLIMITED RISK**: This strategy has undefined maximum loss. "
+                            "Not suitable for most accounts. Requires margin and active management."
+                        )
+                    elif trade.max_loss > 500:
+                        st.warning(
+                            f"**Position Sizing**: Max loss ${trade.max_loss:.0f} per contract. "
+                            f"Ensure this fits within your risk tolerance and account size. "
+                            f"Never risk more than you can afford to lose."
+                        )
+                    
+                    # Commission disclaimer
+                    st.caption(
+                        "*P&L figures exclude commissions, fees, and assignment costs. "
+                        "Actual results will differ. Typical options commissions: $0.50-$0.65 per contract."
+                    )
                     
                     # Regime warnings (PR #4)
                     regime_warnings = trade.metrics.get('regime_warnings', [])
@@ -323,14 +379,25 @@ if st.button("🚀 Run Analysis", use_container_width=True):
                     # Trade Greeks (PR #5)
                     if trade.greeks:
                         st.markdown("#### 📊 Position Greeks")
+                        
+                        # Check for missing/zero Greeks
+                        greeks_delta = trade.greeks.get('delta', 0)
+                        greeks_gamma = trade.greeks.get('gamma', 0)
+                        greeks_vega = trade.greeks.get('vega', 0)
+                        greeks_theta = trade.greeks.get('theta', 0)
+                        
+                        all_zero = all(v == 0 for v in [greeks_delta, greeks_gamma, greeks_vega, greeks_theta])
+                        if all_zero:
+                            st.error("**Greeks Unavailable** - Broker did not provide Greeks data. Stress test results will be unreliable.")
+                        
                         g1, g2, g3, g4 = st.columns(4)
-                        g1.metric("Delta (Δ)", f"{trade.greeks.get('delta', 0):+.2f}", 
+                        g1.metric("Delta (Δ)", f"{greeks_delta:+.2f}", 
                                  help="Directional exposure. +1 delta ≈ 100 shares long")
-                        g2.metric("Gamma (Γ)", f"{trade.greeks.get('gamma', 0):+.4f}",
+                        g2.metric("Gamma (Γ)", f"{greeks_gamma:+.4f}",
                                  help="Delta sensitivity. Negative = short gamma risk")
-                        g3.metric("Vega (V)", f"{trade.greeks.get('vega', 0):+.2f}",
+                        g3.metric("Vega (V)", f"{greeks_vega:+.2f}",
                                  help="Vol sensitivity. Negative = hurt by vol increase")
-                        g4.metric("Theta (Θ)", f"{trade.greeks.get('theta', 0):+.2f}",
+                        g4.metric("Theta (Θ)", f"{greeks_theta:+.2f}",
                                  help="Time decay. Negative = lose value daily")
                         
                         source = trade.greeks.get('source', 'UNKNOWN')
@@ -385,6 +452,13 @@ if st.button("🚀 Run Analysis", use_container_width=True):
                         
                         if stress_result.has_threshold_breach:
                             st.error(f"⚠️ {len(stress_result.breach_scenarios)} scenario(s) exceed loss threshold")
+                        
+                        # Gap/Overnight risk warning
+                        st.warning(
+                            "**Overnight Risk**: These scenarios do not model gap risk. Markets can open "
+                            "significantly higher or lower than previous close. Options positions held overnight "
+                            "are exposed to gap moves that may exceed modeled worst-case scenarios."
+                        )
                     
                     st.divider()
                     
@@ -393,9 +467,24 @@ if st.button("🚀 Run Analysis", use_container_width=True):
                     legs_df = pd.DataFrame([l.__dict__ for l in trade.legs])
                     st.dataframe(legs_df, hide_index=True)
                     
-                    # Explanation Mockup (LLM Hook)
-                    st.info(f"💡 **AI Insight**: High conviction {trade.strategy_name} setup on {trade.ticker}. "
-                            f"The risk/reward ratio is favorable with a break-even range of {trade.breakevens}.")
+                    # Analysis Summary (conditioned on actual confidence)
+                    if trade.confidence_score >= 70 and trade.pop is not None:
+                        st.info(
+                            f"**Analysis**: {trade.strategy_name} on {trade.ticker} shows favorable metrics. "
+                            f"Break-even range: {trade.breakevens}. "
+                            f"**Verify independently before trading.**"
+                        )
+                    elif trade.confidence_score >= 50:
+                        st.warning(
+                            f"**Moderate Confidence**: {trade.strategy_name} on {trade.ticker}. "
+                            f"Some metrics are favorable but POP may be unverified. "
+                            f"Break-even range: {trade.breakevens}. **Requires additional analysis.**"
+                        )
+                    else:
+                        st.error(
+                            f"**Low Confidence**: Insufficient verified data for {trade.strategy_name} on {trade.ticker}. "
+                            f"Do NOT rely on this analysis for trading decisions."
+                        )
                     
                     # Save to Journal button (PR #7)
                     if trade.is_tradable:

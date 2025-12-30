@@ -1,8 +1,10 @@
-# AlphaStrike ⚡
+# AlphaStrike
 
 > **Options Analysis & Paper Trading Toolkit**
 
 AlphaStrike is an open-source options analysis engine for studying multi-leg strategies, market regimes, and portfolio risk. It is designed for learning, paper trading, and strategy research.
+
+**IMPORTANT**: This is a research and educational tool only. All outputs require independent verification before any trading decisions. See disclaimers below.
 
 ---
 
@@ -16,7 +18,7 @@ AlphaStrike is an open-source options analysis engine for studying multi-leg str
 
 ## What AlphaStrike Is NOT
 
-- ❌ **Not a trading system** — it does not execute trades
+- ❌ **Not a trading system** — live trading is available but requires explicit confirmation
 - ❌ **Not financial advice** — it is software, not a recommendation
 - ❌ **Not a profit guarantee** — past patterns do not predict future results
 - ❌ **Not a black box** — all logic is transparent and auditable
@@ -43,7 +45,7 @@ AlphaStrike is **conservative by design**:
 1. **Honesty over hype** — No performance claims. No backtest promises.
 2. **Transparency over magic** — All calculations are visible and documented.
 3. **Paper trading first** — Journal trades, track outcomes, validate over time.
-4. **Free data only** — Works with Tradier's free sandbox API.
+4. **Multi-source data** — Supports Tradier, Public.com, and hybrid cross-validation.
 5. **Fail-safe defaults** — Trades are rejected unless explicitly valid.
 
 ---
@@ -71,7 +73,8 @@ AlphaStrike is **conservative by design**:
     ```
 3.  Set up environment variables in `.env` (see `.env.example` or below):
     ```env
-    TRADIER_TOKEN=your_token_here
+    TRADIER_TOKEN=your_tradier_token
+    PUBLIC_API_SECRET=your_public_secret  # Optional: for real-time quotes
     ```
 
 ## Usage
@@ -130,7 +133,7 @@ for trade in results:
 ## ⚠️ Known Limitations
 
 ### Data Limitations (Free Tier)
-- **IV Rank: NOT IMPLEMENTED** - Requires 52-week IV history not available in free data
+- **IV Rank: PROXY ONLY** - Uses HV percentile as approximation (labeled `HV_PROXY`)
 - **No bid-ask spread analysis**: Uses midpoint pricing which may not reflect actual executable prices
 - **No liquidity checks**: Does not verify option volume or open interest for execution feasibility
 
@@ -500,12 +503,105 @@ All metrics based **ONLY** on user-logged outcomes:
 - No inferred outcomes
 - Only user-entered data counts as truth
 
+## Safety Features (PR #8)
+
+AlphaStrike includes multiple layers of safety features to prevent misuse:
+
+### In-App Warnings
+| Warning Type | Location | Trigger |
+|--------------|----------|---------|
+| **Research Tool Banner** | App header | Always visible |
+| **Trade-level Disclaimer** | Each trade card | Always visible |
+| **Position Sizing Warning** | Trade details | Max loss > $500 |
+| **Unlimited Risk Alert** | Trade details | Undefined max loss |
+| **Greeks Unavailable** | Trade details | Zero/missing Greeks |
+| **Gap/Overnight Risk** | Stress test section | Always visible |
+| **Data Freshness** | Results header | Shows analysis timestamp |
+
+### Confidence-Based Messaging
+Analysis messaging is conditioned on actual confidence score:
+- **High Confidence (70+)**: Neutral analysis with "verify independently" reminder
+- **Moderate Confidence (50-70)**: Warning that POP may be unverified
+- **Low Confidence (<50)**: Error banner stating "Do NOT rely on this analysis"
+
+### Audit Logging
+All trade proposals and rejections are logged with:
+- Ticker, strategy, confidence score
+- Tradability status and rejection reasons
+- Missing Greeks warnings
+- Regime detection results
+
+Logs are available at `alphastrike.audit` logger level.
+
+### POP Estimation
+| Strategy | POP Method | Label |
+|----------|------------|-------|
+| Calendar | Monte Carlo integration | `VERIFIED` |
+| Iron Condor | Delta proxy (1 - |put_delta| - |call_delta|) | `DELTA_PROXY` |
+| Vertical (Bull Put/Bear Call) | Delta proxy | `DELTA_PROXY` |
+| Other strategies | Not computed | `UNVERIFIED` |
+
+## Data Providers
+
+### Hybrid Provider (Recommended)
+Combines multiple data sources for maximum reliability:
+
+| Source | Usage | Benefit |
+|--------|-------|--------|
+| Public.com | Real-time quotes | No delay |
+| Tradier | Historical data | Better OHLCV |
+| Cross-validation | Compares both | Detects stale data |
+
+**Features:**
+- Parallel fetching from both providers
+- Automatic fallback if one fails
+- Warns on >2% spot price discrepancy
+- Warns on >5% option quote discrepancy
+- Merges best data from both sources
+
+### Provider Selection
+| Provider | Real-time | Historical | Cross-validation |
+|----------|-----------|------------|------------------|
+| Hybrid | ✅ | ✅ | ✅ |
+| Public.com Only | ✅ | ❌ | ❌ |
+| Tradier Only | ❌ (delayed) | ✅ | ❌ |
+| Mock | N/A | N/A | N/A |
+
+## Live Trading (Public.com)
+
+AlphaStrike supports live trading via Public.com API with comprehensive safety controls.
+
+### Safety Controls
+| Control | Description |
+|---------|-------------|
+| Paper mode default | Must explicitly enable live trading |
+| Environment gate | Requires `ALPHASTRIKE_LIVE_TRADING=ENABLED` |
+| Confirmation required | `confirmed=True` must be passed |
+| Position limits | Max 10 contracts per trade (configurable) |
+| Daily limits | Max 20 trades/day, $2000 daily loss limit |
+| Preflight checks | Validates buying power before every order |
+| Audit logging | All actions logged with timestamps |
+
+### Setup
+```env
+PUBLIC_API_SECRET=your_secret_key  # From https://public.com/settings/security/api
+PUBLIC_ACCOUNT_ID=your_account_id  # Optional
+ALPHASTRIKE_LIVE_TRADING=ENABLED   # Required for live orders
+```
+
+### Order Flow
+1. **Preflight** - Validates margin, buying power, position limits
+2. **Confirmation** - Requires explicit `confirmed=True`
+3. **Execution** - Places limit order via Public.com API
+4. **Logging** - Records all actions for audit trail
+
 ## Recommended Before Live Trading
 
+- [x] ~~Implement bid-ask spread warnings~~ (PR #2)
+- [x] ~~Add commission/fee calculations~~ (PR #8 - disclaimer added)
+- [x] ~~Add position Greeks monitoring~~ (PR #5)
 - [ ] Only use strategies with VERIFIED POP for probability-based decisions
 - [ ] Paper trade extensively to validate strategies
-- [ ] Implement bid-ask spread warnings
-- [ ] Add commission/fee calculations
 - [ ] Include delta hedging logic
-- [ ] Add position Greeks monitoring
+- [ ] Implement backtesting for strategy validation
 - [ ] Consult with a licensed financial advisor

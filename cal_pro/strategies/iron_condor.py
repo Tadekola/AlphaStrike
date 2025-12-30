@@ -1,7 +1,7 @@
 import datetime as dt
 from typing import List, Dict, Any, Optional
-from ..engine.base_strategy import Strategy, CandidateTrade, Leg, MarketState, POP_LABEL_UNVERIFIED
-from ..engine.utils import mid_iv, round_strike
+from ..engine.base_strategy import CandidateTrade, Leg, MarketState, POP_LABEL_UNVERIFIED, POP_LABEL_DELTA_PROXY
+from ..engine.utils import mid_iv
 
 class IronCondorStrategy:
     def __init__(self, 
@@ -104,6 +104,11 @@ class IronCondorStrategy:
             Leg(market.ticker, long_call_k, expiry, "call", "buy"),
         ]
         
+        # Estimate POP using delta-based proxy
+        # For Iron Condor: POP ≈ 1 - |short_put_delta| - |short_call_delta|
+        # This assumes deltas approximate probability of expiring ITM
+        pop_estimate = self._estimate_pop_delta_proxy(chain, short_put_k, short_call_k)
+        
         candidates.append(CandidateTrade(
             strategy_name="Iron Condor",
             ticker=market.ticker,
@@ -112,8 +117,8 @@ class IronCondorStrategy:
             max_loss=round(max_loss * 100, 2),
             max_profit=round(total_credit * 100, 2),
             breakevens=[short_put_k - total_credit, short_call_k + total_credit],
-            pop=None,  # POP not computed - requires proper delta-based calculation
-            pop_label=POP_LABEL_UNVERIFIED,
+            pop=pop_estimate,
+            pop_label=POP_LABEL_DELTA_PROXY if pop_estimate else POP_LABEL_UNVERIFIED,
             description=f"IC {long_put_k}/{short_put_k} | {short_call_k}/{long_call_k}"
         ))
         
@@ -123,3 +128,30 @@ class IronCondorStrategy:
         opts = [o for o in chain.options if o.right == right]
         if not opts: return None
         return min(opts, key=lambda o: abs(o.strike - target)).strike
+    
+    def _estimate_pop_delta_proxy(self, chain, short_put_k: float, short_call_k: float) -> Optional[float]:
+        """Estimate POP using delta as probability proxy.
+        
+        For an Iron Condor:
+        - Short put delta ≈ probability of put expiring ITM (negative value)
+        - Short call delta ≈ probability of call expiring ITM (positive value)
+        - POP ≈ 1 - P(short put ITM) - P(short call ITM)
+        
+        This is an APPROXIMATION. Deltas are not exact probabilities.
+        """
+        short_put = next((o for o in chain.options if o.right == 'put' and o.strike == short_put_k), None)
+        short_call = next((o for o in chain.options if o.right == 'call' and o.strike == short_call_k), None)
+        
+        if not short_put or not short_call:
+            return None
+        
+        # Put delta is negative, represents P(ITM) as absolute value
+        put_itm_prob = abs(short_put.delta) if short_put.delta else 0.15
+        # Call delta is positive, represents P(ITM) directly
+        call_itm_prob = abs(short_call.delta) if short_call.delta else 0.15
+        
+        # POP = 1 - P(either short expires ITM)
+        # Simplified: assumes independence (not perfectly accurate but reasonable estimate)
+        pop = 1.0 - put_itm_prob - call_itm_prob
+        
+        return max(0.0, min(1.0, pop))

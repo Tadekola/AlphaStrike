@@ -314,9 +314,9 @@ class StressTestEngine:
         gamma_pnl = 0.5 * gamma * (price_change ** 2) * self.config.contract_multiplier
         
         # Vega contribution: V × Δσ × 100
-        # Note: Vega is typically per 1% IV change, so divide by 100
-        # But scenario.vol_change_points is in percentage points (e.g., 10 = 10pts)
-        # Standard vega convention: $ change per 1 IV point
+        # Broker vega is quoted as $ change per 1 IV point per share
+        # scenario.vol_change_points is in percentage points (e.g., 10 = +10 IV points)
+        # Multiply by contract_multiplier (100) to get per-contract P&L
         vega_pnl = vega * scenario.vol_change_points * self.config.contract_multiplier
         
         # Total estimated P&L

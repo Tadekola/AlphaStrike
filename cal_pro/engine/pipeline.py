@@ -13,8 +13,9 @@ from .portfolio import (
     ExposureCheck, ExposureStatus, GreeksSource
 )
 from .utils import get_quote
+from .logging_config import get_logger, audit_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger("pipeline")
 
 # Regime rejection status
 REGIME_REJECTED = "REJECTED — REGIME UNSUITABLE"
@@ -100,9 +101,32 @@ class Pipeline:
                 
                 # 8. Score
                 self.scorer.score(trade, market)
+                
+                # 9. Audit logging
+                audit_logger.log_trade_proposed(
+                    ticker=trade.ticker,
+                    strategy=trade.strategy_name,
+                    confidence=trade.confidence_score,
+                    tradable=trade.is_tradable
+                )
+                
+                if not trade.is_tradable:
+                    audit_logger.log_trade_rejected(
+                        ticker=trade.ticker,
+                        strategy=trade.strategy_name,
+                        reasons=trade.rejection_reasons
+                    )
+                
+                # Check for missing Greeks
+                if trade.greeks:
+                    all_zero = all(v == 0 for k, v in trade.greeks.items() if k != 'source')
+                    if all_zero:
+                        audit_logger.log_greeks_missing(trade.ticker, trade.strategy_name)
+                        trade.metrics['greeks_warning'] = "Greeks unavailable - stress test unreliable"
+                
                 results.append(trade)
                     
-        # 8. Sort: tradable first, then by confidence
+        # 10. Sort: tradable first, then by confidence
         results.sort(key=lambda x: (x.is_tradable, x.confidence_score), reverse=True)
         
         return results, market, regime
